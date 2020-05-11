@@ -1627,23 +1627,45 @@ byebug
   end
 
   def parse_wi(h)
-    # direct data available here:
-    # https://dhsgis.wi.gov/server/rest/services/DHS_COVID19/COVID19_WI/MapServer/3/query?where=1%3D1&outFields=*&outSR=4326&f=json
-    # counties also available
-    crawl_page
-    if @s =~ /As of ([^<]+)</
-      h[:date] = $1.strip
-    else
-      @errors << "missing date"
-    end
-    @s = @driver.find_elements(id: 'main')[0].text.gsub(',','')
-    if @s =~ /Negative Test Result (\d+)\nPositive Test Result (\d+)\nHospitalizations [^\n]+\nDeaths (\d+)\n/
-      h[:positive] = string_to_i($2)
-      h[:negative] = string_to_i($1)
-      h[:deaths] = string_to_i($3)
-    else
+    uri = URI(h[:source_urls].first)
+    response = Net::HTTP.get(uri)
+    parsed_json = JSON.parse(response)
+    state_data = parsed_json.dig('features', 0)
+
+    if state_data.nil? || state_data.empty?
       @errors << "missing cases"
+      return h
     end
+
+    data = {}
+
+    parsed_json['features']&.each do |object|
+      object_body = object['properties']
+      next if object_body.nil? || object_body['NAME'].nil? || object_body['OBJECTID'].nil?
+      data[object_body['NAME']] = {} if data[object_body['NAME']].nil?
+      data[object_body['NAME']][object_body['OBJECTID']] = {
+        pos: object_body['POSITIVE'],
+        neg: object_body['NEGATIVE'],
+        death: object_body['DEATHS'],
+        date: object_body['LoadDttm']
+      }
+    end
+    current_day = data['WI']&.keys&.max
+    county_data = data&.map do |county_name, value|
+      next if county_name == 'WI' || value[current_day].nil?
+      {
+        name: county_name,
+        positive: value.dig(current_day, :pos),
+        negative: value.dig(current_day, :neg),
+        death: value.dig(current_day, :death)
+      }
+    end
+
+    h[:positive]  = data.dig('WI', current_day, :pos)
+    h[:negative]  = data.dig('WI', current_day, :neg)
+    h[:death]     = data.dig('WI', current_day, :death)
+    h[:counties]  = county_data unless county_data.compact.empty?
+
     h
   end
 
